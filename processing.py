@@ -1,24 +1,46 @@
 import ee
+import json
+import streamlit as st
 
 
 # =========================================================
-# 1) Initialisation Google Earth Engine
+# 1) Configuration generale
 # =========================================================
 PROJECT_ID = "habitat-du-macaque-de-barbarie"
 REGION_ASSET = "projects/habitat-du-macaque-de-barbarie/assets/fes_meknes"
 
-ee.Initialize(project=PROJECT_ID)
+
+# =========================================================
+# 2) Initialisation Google Earth Engine
+#    - en local : fallback sur ee.Initialize(project=...)
+#    - en cloud : service account depuis st.secrets
+# =========================================================
+def init_gee():
+    try:
+        service_account_json = st.secrets["GEE_SERVICE_ACCOUNT_JSON"]
+        key_data = json.loads(service_account_json)
+
+        credentials = ee.ServiceAccountCredentials(
+            email=key_data["client_email"],
+            key_data=service_account_json
+        )
+        ee.Initialize(credentials, project=PROJECT_ID)
+    except Exception:
+        ee.Initialize(project=PROJECT_ID)
+
+
+init_gee()
 
 
 # =========================================================
-# 2) Zone d'etude : Fes-Meknes
+# 3) Zone d'etude : Fes-Meknes
 # =========================================================
 region_fc = ee.FeatureCollection(REGION_ASSET)
 region_geom = region_fc.geometry()
 
 
 # =========================================================
-# 3) Masquage simple des nuages Sentinel-2
+# 4) Masquage simple des nuages Sentinel-2
 # =========================================================
 def mask_s2_clouds(image):
     qa = image.select("QA60")
@@ -35,7 +57,7 @@ def mask_s2_clouds(image):
 
 
 # =========================================================
-# 4) Collection Sentinel-2
+# 5) Collection Sentinel-2
 # =========================================================
 def get_sentinel_collection(start_date, end_date, cloud_pct=20):
     return (
@@ -48,7 +70,7 @@ def get_sentinel_collection(start_date, end_date, cloud_pct=20):
 
 
 # =========================================================
-# 5) Composite median
+# 6) Composite median
 # =========================================================
 def get_median_image(start_date, end_date, cloud_pct=20):
     collection = get_sentinel_collection(start_date, end_date, cloud_pct)
@@ -57,7 +79,7 @@ def get_median_image(start_date, end_date, cloud_pct=20):
 
 
 # =========================================================
-# 6) Indice d'humidite (NDMI)
+# 7) Indice d'humidite (NDMI)
 #    NDMI = (B8 - B11) / (B8 + B11)
 # =========================================================
 def get_moisture_index_image(start_date, end_date, cloud_pct=20):
@@ -67,7 +89,7 @@ def get_moisture_index_image(start_date, end_date, cloud_pct=20):
 
 
 # =========================================================
-# 7) Statistiques d'une image
+# 8) Statistiques d'une image
 # =========================================================
 def get_image_stats(image, band_name, scale=10):
     stats = image.reduceRegion(
@@ -89,7 +111,7 @@ def get_image_stats(image, band_name, scale=10):
 
 
 # =========================================================
-# 8) Analyse complete de changement d'humidite
+# 9) Analyse complete de changement d'humidite
 # =========================================================
 def analyze_moisture_change(
     start_date_1,
@@ -167,18 +189,18 @@ def analyze_moisture_change(
 
 
 # =========================================================
-# 9) Palettes de couleurs plus lisibles
+# 10) Palettes de couleurs lisibles
 # =========================================================
 MOISTURE_VIS = {
     "min": -0.40,
     "max": 0.60,
     "palette": [
-        "#8c510a",  # brun
-        "#d8b365",
-        "#f6e8c3",
-        "#c7eae5",
-        "#5ab4ac",
-        "#01665e"   # bleu-vert doux
+        "#8c510a",  # brun fonce = faible humidite
+        "#d8b365",  # brun clair / sable
+        "#f6e8c3",  # beige clair = humidite moyenne faible
+        "#c7eae5",  # bleu tres clair
+        "#5ab4ac",  # bleu-vert moyen
+        "#01665e"   # bleu-vert fonce = forte humidite
     ]
 }
 
@@ -186,30 +208,43 @@ DIFF_VIS = {
     "min": -0.30,
     "max": 0.30,
     "palette": [
-        "#b2182b",
-        "#ef8a62",
-        "#fddbc7",
-        "#f7f7f7",
-        "#d1e5f0",
-        "#67a9cf",
-        "#2166ac"
+        "#b2182b",  # rouge fonce = perte forte
+        "#ef8a62",  # rouge clair
+        "#fddbc7",  # rose clair
+        "#f7f7f7",  # blanc = stable
+        "#d1e5f0",  # bleu tres clair
+        "#67a9cf",  # bleu moyen
+        "#2166ac"   # bleu fonce = gain fort
     ]
 }
 
 GAIN_VIS = {
     "min": 0,
     "max": 1,
-    "palette": ["#deebf7", "#9ecae1", "#3182bd", "#08519c"]
+    "palette": [
+        "#deebf7",  # bleu tres clair
+        "#9ecae1",  # bleu clair
+        "#3182bd",  # bleu moyen
+        "#08519c"   # bleu fonce
+    ]
 }
 
 LOSS_VIS = {
     "min": 0,
     "max": 1,
-    "palette": ["#fee5d9", "#fcae91", "#fb6a4a", "#cb181d"]
+    "palette": [
+        "#fee5d9",  # rouge tres clair
+        "#fcae91",  # saumon clair
+        "#fb6a4a",  # rouge-orange
+        "#cb181d"   # rouge fonce
+    ]
 }
 
 BINARY_CHANGE_VIS = {
     "min": 0,
     "max": 1,
-    "palette": ["#ffffff", "#6a3d9a"]
+    "palette": [
+        "#ffffff",  # blanc
+        "#6a3d9a"   # violet
+    ]
 }
