@@ -12,21 +12,32 @@ REGION_ASSET = "projects/habitat-du-macaque-de-barbarie/assets/fes_meknes"
 
 # =========================================================
 # 2) Initialisation Google Earth Engine
-#    - en local : fallback sur ee.Initialize(project=...)
-#    - en cloud : service account depuis st.secrets
+#    - cloud : service account depuis st.secrets
+#    - local : fallback sur ee.Initialize(project=...)
 # =========================================================
 def init_gee():
-    try:
-        service_account_json = st.secrets["GEE_SERVICE_ACCOUNT_JSON"]
-        key_data = json.loads(service_account_json)
+    service_account_json = st.secrets.get("GEE_SERVICE_ACCOUNT_JSON", None)
 
-        credentials = ee.ServiceAccountCredentials(
-            email=key_data["client_email"],
-            key_data=service_account_json
-        )
-        ee.Initialize(credentials, project=PROJECT_ID)
-    except Exception:
-        ee.Initialize(project=PROJECT_ID)
+    # Cas Streamlit Cloud / secrets disponibles
+    if service_account_json:
+        try:
+            key_data = json.loads(service_account_json)
+
+            credentials = ee.ServiceAccountCredentials(
+                email=key_data["client_email"],
+                key_data=service_account_json
+            )
+
+            ee.Initialize(credentials=credentials, project=PROJECT_ID)
+            return
+
+        except Exception as e:
+            raise RuntimeError(
+                f"Echec de l'initialisation Earth Engine via st.secrets : {e}"
+            )
+
+    # Cas local sans secret
+    ee.Initialize(project=PROJECT_ID)
 
 
 init_gee()
