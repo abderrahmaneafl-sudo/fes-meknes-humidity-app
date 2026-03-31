@@ -16,106 +16,61 @@ from processing import (
     BINARY_CHANGE_VIS
 )
 
-# ---------------------------------------------------------
-# Configuration de la page
-# ---------------------------------------------------------
+# =========================================================
+# 1. Configuration generale de la page
+# =========================================================
 st.set_page_config(
     page_title="Detection de changement d'humidite",
     page_icon="🛰️",
     layout="wide"
 )
 
-# ---------------------------------------------------------
-# Styles
-# ---------------------------------------------------------
-st.markdown("""
-<style>
-.block-title {
-    font-size: 1.18rem;
-    font-weight: 700;
-    margin-bottom: 0.7rem;
-}
-.info-box {
-    background-color: #f7f9fc;
-    border: 1px solid #dfe6ee;
-    border-radius: 10px;
-    padding: 14px 16px;
-    margin-bottom: 12px;
-}
-.section-box {
-    background-color: white;
-    border: 1px solid #e5e7eb;
-    border-radius: 12px;
-    padding: 16px;
-    margin-bottom: 18px;
-}
-.small-muted {
-    color: #5b6573;
-    font-size: 0.95rem;
-}
-.stat-card {
-    background: #fafbfc;
-    border: 1px solid #e5e7eb;
-    border-radius: 12px;
-    padding: 14px;
-    height: 100%;
-}
-.stat-title {
-    font-size: 0.95rem;
-    color: #4b5563;
-    margin-bottom: 8px;
-    font-weight: 600;
-}
-.stat-value {
-    font-size: 1.7rem;
-    font-weight: 700;
-    color: #111827;
-}
-.stat-sub {
-    font-size: 0.88rem;
-    color: #6b7280;
-    margin-top: 6px;
-}
-.good {
-    color: #0f766e;
-    font-weight: 700;
-}
-.bad {
-    color: #b91c1c;
-    font-weight: 700;
-}
-.neutral {
-    color: #374151;
-    font-weight: 700;
-}
-</style>
-""", unsafe_allow_html=True)
+# =========================================================
+# 2. Fonctions utilitaires
+# =========================================================
 
-# ---------------------------------------------------------
-# Fonctions utilitaires
-# ---------------------------------------------------------
 MONTHS_FR = {
-    1: "janvier", 2: "fevrier", 3: "mars", 4: "avril",
-    5: "mai", 6: "juin", 7: "juillet", 8: "aout",
-    9: "septembre", 10: "octobre", 11: "novembre", 12: "decembre"
+    1: "janvier",
+    2: "fevrier",
+    3: "mars",
+    4: "avril",
+    5: "mai",
+    6: "juin",
+    7: "juillet",
+    8: "aout",
+    9: "septembre",
+    10: "octobre",
+    11: "novembre",
+    12: "decembre"
 }
 
 
-def fmt_date(d: date) -> str:
+def format_date(d: date) -> str:
+    """Transforme une date Python en texte au format YYYY-MM-DD."""
     return d.strftime("%Y-%m-%d")
 
 
 def short_period_label(start_d: date, end_d: date) -> str:
+    """
+    Retourne un label court pour une periode.
+    Exemple :
+    - janvier 2022
+    - 2022-01-01 -> 2022-02-15
+    """
     if start_d.month == end_d.month and start_d.year == end_d.year:
         return f"{MONTHS_FR[start_d.month]} {start_d.year}"
-    return f"{fmt_date(start_d)} -> {fmt_date(end_d)}"
+    return f"{format_date(start_d)} -> {format_date(end_d)}"
 
 
 def build_dynamic_title(start_1: date, end_1: date, start_2: date, end_2: date) -> str:
+    """Construit le titre dynamique de la carte."""
     return f"Comparaison humidite : {short_period_label(start_1, end_1)} vs {short_period_label(start_2, end_2)}"
 
 
 def automatic_interpretation(stats: dict) -> str:
+    """
+    Genere un texte automatique a partir des statistiques.
+    """
     p1 = stats["period_1"]["mean"]
     p2 = stats["period_2"]["mean"]
     diff = stats["difference"]["mean"]
@@ -123,22 +78,34 @@ def automatic_interpretation(stats: dict) -> str:
     gain_prop = stats["gain"]["proportion"]
     loss_prop = stats["loss"]["proportion"]
 
-    tendance = "augmenté" if diff > 0 else "diminué" if diff < 0 else "peu varié"
-    dominance = (
-        "les gains d'humidite dominent" if gain_prop > loss_prop
-        else "les pertes d'humidite dominent" if loss_prop > gain_prop
-        else "les gains et pertes sont proches"
-    )
+    if diff > 0:
+        tendance = "augmenté"
+    elif diff < 0:
+        tendance = "diminué"
+    else:
+        tendance = "peu varié"
 
-    return (
+    if gain_prop > loss_prop:
+        dominance = "les gains d'humidite dominent"
+    elif loss_prop > gain_prop:
+        dominance = "les pertes d'humidite dominent"
+    else:
+        dominance = "les gains et les pertes sont proches"
+
+    texte = (
         f"L'humidite moyenne est passée de {p1:.3f} a {p2:.3f}. "
         f"La variation moyenne a donc {tendance} ({diff:.3f}). "
-        f"Environ {change_prop*100:.2f}% de la zone presente un changement significatif. "
+        f"Environ {change_prop * 100:.2f}% de la zone presente un changement significatif. "
         f"Globalement, {dominance}."
     )
+    return texte
 
 
 def build_stats_dataframe(stats: dict, threshold: float, cloud_pct: int) -> pd.DataFrame:
+    """
+    Construit un tableau pandas contenant les statistiques
+    qui seront ensuite affichees dans Streamlit.
+    """
     rows = [
         ["Humidite periode 1", stats["period_1"]["mean"], stats["period_1"]["stdDev"], stats["period_1"]["min"], stats["period_1"]["max"]],
         ["Humidite periode 2", stats["period_2"]["mean"], stats["period_2"]["stdDev"], stats["period_2"]["min"], stats["period_2"]["max"]],
@@ -152,10 +119,16 @@ def build_stats_dataframe(stats: dict, threshold: float, cloud_pct: int) -> pd.D
         ["Seuil humidite", threshold, None, None, None],
         ["Nuages max (%)", cloud_pct, None, None, None],
     ]
+
     return pd.DataFrame(rows, columns=["Indicateur", "Valeur", "StdDev", "Min", "Max"])
 
 
-def add_compact_legend():
+def add_compact_legend() -> str:
+    """
+    Retourne une petite legende HTML a afficher sur la carte Folium.
+    Ici, on garde un peu de HTML car Folium a besoin de HTML
+    pour afficher une legende directement sur la carte.
+    """
     return """
     <div style="
         position: fixed;
@@ -193,7 +166,22 @@ def add_compact_legend():
     """
 
 
-def build_map(layer_mode: str, result: dict, map_title: str):
+def get_delta_text(v1: float, v2: float) -> str:
+    """Retourne le delta entre deux valeurs pour l'affichage des metrics."""
+    delta = v2 - v1
+    sign = "+" if delta >= 0 else ""
+    return f"{sign}{delta:.3f}"
+
+
+# =========================================================
+# 3. Fonctions de construction des cartes
+# =========================================================
+
+def build_thematic_map(layer_mode: str, result: dict, map_title: str):
+    """
+    Construit la carte thematique principale avec les couches
+    choisies dans l'interface.
+    """
     m = geemap.Map()
     m.centerObject(region_geom, 8)
 
@@ -211,14 +199,19 @@ def build_map(layer_mode: str, result: dict, map_title: str):
         m.addLayer(gain_mask.selfMask(), GAIN_VIS, "Gains")
         m.addLayer(loss_mask.selfMask(), LOSS_VIS, "Pertes")
         m.addLayer(change_mask.selfMask(), BINARY_CHANGE_VIS, "Changement detecte")
+
     elif layer_mode == "Voir seulement periode 1":
         m.addLayer(moisture_1, MOISTURE_VIS, "Humidite - Periode 1")
+
     elif layer_mode == "Voir seulement periode 2":
         m.addLayer(moisture_2, MOISTURE_VIS, "Humidite - Periode 2")
+
     elif layer_mode == "Voir seulement difference":
         m.addLayer(moisture_diff, DIFF_VIS, "Difference humidite")
+
     elif layer_mode == "Voir seulement gains":
         m.addLayer(gain_mask.selfMask(), GAIN_VIS, "Gains")
+
     elif layer_mode == "Voir seulement pertes":
         m.addLayer(loss_mask.selfMask(), LOSS_VIS, "Pertes")
 
@@ -250,20 +243,15 @@ def build_map(layer_mode: str, result: dict, map_title: str):
 
 
 def build_split_map(result: dict, left_label: str, right_label: str):
+    """
+    Construit la carte split panel pour comparer la periode 1
+    et la periode 2 sur une meme carte.
+    """
     m = geemap.Map()
     m.centerObject(region_geom, 8)
 
-    left_layer = geemap.ee_tile_layer(
-        result["moisture_1"],
-        MOISTURE_VIS,
-        left_label
-    )
-
-    right_layer = geemap.ee_tile_layer(
-        result["moisture_2"],
-        MOISTURE_VIS,
-        right_label
-    )
+    left_layer = geemap.ee_tile_layer(result["moisture_1"], MOISTURE_VIS, left_label)
+    right_layer = geemap.ee_tile_layer(result["moisture_2"], MOISTURE_VIS, right_label)
 
     left_layer.add_to(m)
     right_layer.add_to(m)
@@ -318,28 +306,21 @@ def build_split_map(result: dict, left_label: str, right_label: str):
     return m
 
 
-def get_delta_text(v1: float, v2: float) -> str:
-    delta = v2 - v1
-    sign = "+" if delta >= 0 else ""
-    return f"{sign}{delta:.3f}"
-
-
-def get_variation_label(value: float) -> str:
-    if value > 0:
-        return "<span class='good'>Augmentation</span>"
-    elif value < 0:
-        return "<span class='bad'>Diminution</span>"
-    return "<span class='neutral'>Stable</span>"
-
+# =========================================================
+# 4. Fonctions de construction des graphiques
+# =========================================================
 
 def build_mean_chart(p1_mean: float, p2_mean: float, diff_mean: float):
+    """Graphique des humidites moyennes."""
     fig = go.Figure()
+
     fig.add_bar(
         x=["Periode 1", "Periode 2", "Difference"],
         y=[p1_mean, p2_mean, diff_mean],
         text=[f"{p1_mean:.3f}", f"{p2_mean:.3f}", f"{diff_mean:.3f}"],
         textposition="outside"
     )
+
     fig.update_layout(
         title="Comparaison des humidites moyennes",
         xaxis_title="Indicateurs",
@@ -347,17 +328,21 @@ def build_mean_chart(p1_mean: float, p2_mean: float, diff_mean: float):
         template="plotly_white",
         height=420
     )
+
     return fig
 
 
 def build_proportion_chart(gain_prop: float, loss_prop: float, change_prop: float):
+    """Graphique des proportions de gain, perte et changement."""
     fig = go.Figure()
+
     fig.add_bar(
         x=["Gain", "Perte", "Changement total"],
         y=[gain_prop, loss_prop, change_prop],
         text=[f"{gain_prop:.2f}%", f"{loss_prop:.2f}%", f"{change_prop:.2f}%"],
         textposition="outside"
     )
+
     fig.update_layout(
         title="Proportions de gain, perte et changement",
         xaxis_title="Categorie",
@@ -365,21 +350,19 @@ def build_proportion_chart(gain_prop: float, loss_prop: float, change_prop: floa
         template="plotly_white",
         height=420
     )
+
     return fig
 
 
-# ---------------------------------------------------------
-# Interface
-# ---------------------------------------------------------
+# =========================================================
+# 5. Titre principal de l'application
+# =========================================================
 st.title("🛰️ Detection automatique de changement d'humidite - Region Fes-Meknes")
-st.markdown(
-    "<div class='small-muted'>Comparaison de deux periodes a l'aide d'un indice d'humidite (NDMI).</div>",
-    unsafe_allow_html=True
-)
+st.caption("Comparaison de deux periodes a l'aide d'un indice d'humidite (NDMI).")
 
-# ---------------------------------------------------------
-# Sidebar
-# ---------------------------------------------------------
+# =========================================================
+# 6. Barre laterale : saisie utilisateur
+# =========================================================
 st.sidebar.header("Parametres d'analyse")
 
 st.sidebar.subheader("Periode 1")
@@ -414,9 +397,9 @@ layer_mode = st.sidebar.selectbox(
 
 run_analysis = st.sidebar.button("Lancer l'analyse", use_container_width=True)
 
-# ---------------------------------------------------------
-# Explication
-# ---------------------------------------------------------
+# =========================================================
+# 7. Bloc d'explication pour l'utilisateur
+# =========================================================
 with st.expander("Comprendre le resultat"):
     st.write("""
     Cette application utilise un indice d'humidite de type **NDMI**.
@@ -431,24 +414,27 @@ with st.expander("Comprendre le resultat"):
     Le seuil de changement d'humidite sert a garder seulement les variations importantes.
     """)
 
+# =========================================================
+# 8. Verification des dates
+# =========================================================
 if start_date_1 > end_date_1 or start_date_2 > end_date_2:
     st.error("La date de debut doit etre anterieure ou egale a la date de fin.")
     st.stop()
 
 if not run_analysis:
-    st.info("Configure les parametres dans la barre laterale, puis clique sur **Lancer l'analyse**.")
+    st.info("Configure les parametres dans la barre laterale, puis clique sur 'Lancer l'analyse'.")
     st.stop()
 
-# ---------------------------------------------------------
-# Analyse
-# ---------------------------------------------------------
+# =========================================================
+# 9. Lancement de l'analyse principale
+# =========================================================
 try:
     with st.spinner("Calcul en cours..."):
         result = analyze_moisture_change(
-            fmt_date(start_date_1),
-            fmt_date(end_date_1),
-            fmt_date(start_date_2),
-            fmt_date(end_date_2),
+            format_date(start_date_1),
+            format_date(end_date_1),
+            format_date(start_date_2),
+            format_date(end_date_2),
             cloud_pct,
             threshold
         )
@@ -458,6 +444,7 @@ try:
     interpretation_text = automatic_interpretation(stats)
     stats_df = build_stats_dataframe(stats, threshold, cloud_pct)
 
+    # Recuperation des statistiques principales
     p1_mean = stats["period_1"]["mean"]
     p2_mean = stats["period_2"]["mean"]
     diff_mean = stats["difference"]["mean"]
@@ -481,122 +468,60 @@ try:
 
     st.success("Analyse terminee avec succes.")
 
-    # -----------------------------------------------------
-    # Bloc 1 : Resume statistique enrichi
-    # -----------------------------------------------------
-    st.markdown("<div class='section-box'>", unsafe_allow_html=True)
-    st.markdown("<div class='block-title'>Bloc 1 - Resume statistique detaille</div>", unsafe_allow_html=True)
+    # =====================================================
+    # 10. Bloc 1 : Resume statistique
+    # =====================================================
+    st.subheader("Bloc 1 - Resume statistique detaille")
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.markdown(f"""
-        <div class='info-box'>
-            <b>Periode 1</b><br>
-            {fmt_date(start_date_1)} → {fmt_date(end_date_1)}
-        </div>
-        """, unsafe_allow_html=True)
-
-    with col_b:
-        st.markdown(f"""
-        <div class='info-box'>
-            <b>Periode 2</b><br>
-            {fmt_date(start_date_2)} → {fmt_date(end_date_2)}
-        </div>
-        """, unsafe_allow_html=True)
+    info_col1, info_col2 = st.columns(2)
+    info_col1.info(f"**Periode 1**\n\n{format_date(start_date_1)} → {format_date(end_date_1)}")
+    info_col2.info(f"**Periode 2**\n\n{format_date(start_date_2)} → {format_date(end_date_2)}")
 
     c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown(f"""
-        <div class='stat-card'>
-            <div class='stat-title'>Humidite moyenne - Periode 1</div>
-            <div class='stat-value'>{p1_mean:.3f}</div>
-            <div class='stat-sub'>StdDev : {p1_std:.3f} | Min : {p1_min:.3f} | Max : {p1_max:.3f}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with c2:
-        st.markdown(f"""
-        <div class='stat-card'>
-            <div class='stat-title'>Humidite moyenne - Periode 2</div>
-            <div class='stat-value'>{p2_mean:.3f}</div>
-            <div class='stat-sub'>StdDev : {p2_std:.3f} | Min : {p2_min:.3f} | Max : {p2_max:.3f}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with c3:
-        st.markdown(f"""
-        <div class='stat-card'>
-            <div class='stat-title'>Difference moyenne</div>
-            <div class='stat-value'>{diff_mean:.3f}</div>
-            <div class='stat-sub'>{get_variation_label(diff_mean)} | StdDev : {diff_std:.3f}</div>
-        </div>
-        """, unsafe_allow_html=True)
+    c1.metric("Humidite moyenne - Periode 1", f"{p1_mean:.3f}")
+    c2.metric("Humidite moyenne - Periode 2", f"{p2_mean:.3f}")
+    c3.metric("Difference moyenne", f"{diff_mean:.3f}")
 
     c4, c5, c6 = st.columns(3)
-    with c4:
-        st.markdown(f"""
-        <div class='stat-card'>
-            <div class='stat-title'>Changement significatif</div>
-            <div class='stat-value'>{change_prop:.2f}%</div>
-            <div class='stat-sub'>Pixels : {change_px:.0f}</div>
-        </div>
-        """, unsafe_allow_html=True)
+    c4.metric("Changement significatif", f"{change_prop:.2f}%")
+    c5.metric("Gain d'humidite", f"{gain_prop:.2f}%")
+    c6.metric("Perte d'humidite", f"{loss_prop:.2f}%")
 
-    with c5:
-        st.markdown(f"""
-        <div class='stat-card'>
-            <div class='stat-title'>Gain d'humidite</div>
-            <div class='stat-value'>{gain_prop:.2f}%</div>
-            <div class='stat-sub'>Pixels : {gain_px:.0f}</div>
-        </div>
-        """, unsafe_allow_html=True)
+    st.write("**Lecture rapide**")
+    quick1, quick2, quick3, quick4 = st.columns(4)
+    quick1.metric("Variation P2 - P1", f"{diff_mean:.3f}", delta=get_delta_text(p1_mean, p2_mean))
+    quick2.metric("Seuil humidite", f"{threshold:.2f}")
+    quick3.metric("Nuages max", f"{cloud_pct}%")
+    quick4.metric(
+        "Dominante",
+        "Gain" if gain_prop > loss_prop else "Perte" if loss_prop > gain_prop else "Equilibre"
+    )
 
-    with c6:
-        st.markdown(f"""
-        <div class='stat-card'>
-            <div class='stat-title'>Perte d'humidite</div>
-            <div class='stat-value'>{loss_prop:.2f}%</div>
-            <div class='stat-sub'>Pixels : {loss_px:.0f}</div>
-        </div>
-        """, unsafe_allow_html=True)
+    st.caption(
+        f"Details : StdDev P1={p1_std:.3f}, StdDev P2={p2_std:.3f}, StdDev Diff={diff_std:.3f} | "
+        f"Min/Max P1={p1_min:.3f}/{p1_max:.3f} | Min/Max P2={p2_min:.3f}/{p2_max:.3f}"
+    )
 
-    st.markdown("### Lecture rapide")
+    # =====================================================
+    # 11. Bloc 2 : Graphiques
+    # =====================================================
+    st.subheader("Bloc 2 - Graphiques d'analyse")
 
-    l1, l2, l3, l4 = st.columns(4)
-    l1.metric("Variation P2 - P1", f"{diff_mean:.3f}", delta=get_delta_text(p1_mean, p2_mean))
-    l2.metric("Seuil humidite", f"{threshold:.2f}")
-    l3.metric("Nuages max", f"{cloud_pct}%")
-    l4.metric("Dominante", "Gain" if gain_prop > loss_prop else "Perte" if loss_prop > gain_prop else "Equilibre")
+    graph_col1, graph_col2 = st.columns(2)
 
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # -----------------------------------------------------
-    # Bloc 2 : Graphiques
-    # -----------------------------------------------------
-    st.markdown("<div class='section-box'>", unsafe_allow_html=True)
-    st.markdown("<div class='block-title'>Bloc 2 - Graphiques d'analyse</div>", unsafe_allow_html=True)
-
-    g1, g2 = st.columns(2)
-
-    with g1:
+    with graph_col1:
         fig_means = build_mean_chart(p1_mean, p2_mean, diff_mean)
         st.plotly_chart(fig_means, use_container_width=True)
 
-    with g2:
+    with graph_col2:
         fig_props = build_proportion_chart(gain_prop, loss_prop, change_prop)
         st.plotly_chart(fig_props, use_container_width=True)
 
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # -----------------------------------------------------
-    # Bloc 3 : Split panel
-    # -----------------------------------------------------
-    st.markdown("<div class='section-box'>", unsafe_allow_html=True)
-    st.markdown("<div class='block-title'>Bloc 3 - Split panel Periode 1 / Periode 2</div>", unsafe_allow_html=True)
-    st.markdown(
-        "<div class='small-muted'>Utilise le curseur vertical pour comparer directement les deux periodes.</div>",
-        unsafe_allow_html=True
-    )
+    # =====================================================
+    # 12. Bloc 3 : Split panel
+    # =====================================================
+    st.subheader("Bloc 3 - Split panel Periode 1 / Periode 2")
+    st.caption("Utilise le curseur vertical pour comparer directement les deux periodes.")
 
     split_map = build_split_map(
         result,
@@ -605,51 +530,35 @@ try:
     )
     split_map.to_streamlit(height=820)
 
-    st.markdown("</div>", unsafe_allow_html=True)
+    # =====================================================
+    # 13. Bloc 4 : Carte thematique
+    # =====================================================
+    st.subheader("Bloc 4 - Carte thematique")
+    st.caption(f"Mode actuel : {layer_mode}")
 
-    # -----------------------------------------------------
-    # Bloc 4 : Carte thematique
-    # -----------------------------------------------------
-    st.markdown("<div class='section-box'>", unsafe_allow_html=True)
-    st.markdown("<div class='block-title'>Bloc 4 - Carte thematique</div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='small-muted'><b>Mode actuel :</b> {layer_mode}</div>",
-        unsafe_allow_html=True
-    )
+    thematic_map = build_thematic_map(layer_mode, result, map_title)
+    thematic_map.to_streamlit(height=820)
 
-    map_obj = build_map(layer_mode, result, map_title)
-    map_obj.to_streamlit(height=820)
+    # =====================================================
+    # 14. Bloc 5 : Interpretation automatique
+    # =====================================================
+    st.subheader("Bloc 5 - Interpretation automatique")
+    st.info(interpretation_text)
 
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # -----------------------------------------------------
-    # Bloc 5 : Interpretation automatique
-    # -----------------------------------------------------
-    st.markdown("<div class='section-box'>", unsafe_allow_html=True)
-    st.markdown("<div class='block-title'>Bloc 5 - Interpretation automatique</div>", unsafe_allow_html=True)
-    st.markdown(f"""
-    <div class='info-box'>
-        {interpretation_text}
-    </div>
-    """, unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # -----------------------------------------------------
-    # Bloc 6 : Tableau statistique detaille
-    # -----------------------------------------------------
-    st.markdown("<div class='section-box'>", unsafe_allow_html=True)
-    st.markdown("<div class='block-title'>Bloc 6 - Tableau statistique detaille</div>", unsafe_allow_html=True)
+    # =====================================================
+    # 15. Bloc 6 : Tableau statistique detaille
+    # =====================================================
+    st.subheader("Bloc 6 - Tableau statistique detaille")
     st.dataframe(stats_df, use_container_width=True)
-    st.markdown("</div>", unsafe_allow_html=True)
 
-    # -----------------------------------------------------
-    # Bloc 7 : Guide rapide
-    # -----------------------------------------------------
-    st.markdown("<div class='section-box'>", unsafe_allow_html=True)
-    st.markdown("<div class='block-title'>Bloc 7 - Guide de lecture</div>", unsafe_allow_html=True)
+    # =====================================================
+    # 16. Bloc 7 : Guide de lecture
+    # =====================================================
+    st.subheader("Bloc 7 - Guide de lecture")
 
-    c1, c2 = st.columns(2)
-    with c1:
+    guide_col1, guide_col2 = st.columns(2)
+
+    with guide_col1:
         st.markdown("""
         **Couches disponibles**
         - Humidite - Periode 1
@@ -659,7 +568,8 @@ try:
         - Pertes
         - Changement detecte
         """)
-    with c2:
+
+    with guide_col2:
         st.markdown("""
         **Lecture**
         - Palette humidite : brun -> jaune -> bleu-vert
@@ -669,19 +579,17 @@ try:
         - Changement detecte : violet
         """)
 
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # -----------------------------------------------------
-    # Bloc 8 : Export
-    # -----------------------------------------------------
-    st.markdown("<div class='section-box'>", unsafe_allow_html=True)
-    st.markdown("<div class='block-title'>Bloc 8 - Export</div>", unsafe_allow_html=True)
+    # =====================================================
+    # 17. Bloc 8 : Export
+    # =====================================================
+    st.subheader("Bloc 8 - Export")
 
     csv_bytes = stats_df.to_csv(index=False).encode("utf-8")
+
     summary_text = f"""Detection automatique de changement d'humidite - Region Fes-Meknes
 
-Periode 1 : {fmt_date(start_date_1)} -> {fmt_date(end_date_1)}
-Periode 2 : {fmt_date(start_date_2)} -> {fmt_date(end_date_2)}
+Periode 1 : {format_date(start_date_1)} -> {format_date(end_date_1)}
+Periode 2 : {format_date(start_date_2)} -> {format_date(end_date_2)}
 
 Humidite moyenne periode 1 : {p1_mean:.3f}
 Humidite moyenne periode 2 : {p2_mean:.3f}
@@ -709,12 +617,12 @@ Interpretation automatique :
 {interpretation_text}
 """
 
-    html_map = map_obj.get_root().render().encode("utf-8")
+    html_map = thematic_map.get_root().render().encode("utf-8")
     html_split = split_map.get_root().render().encode("utf-8")
 
-    e1, e2, e3, e4 = st.columns(4)
+    export_col1, export_col2, export_col3, export_col4 = st.columns(4)
 
-    with e1:
+    with export_col1:
         st.download_button(
             "Exporter les statistiques (CSV)",
             data=csv_bytes,
@@ -723,7 +631,7 @@ Interpretation automatique :
             use_container_width=True
         )
 
-    with e2:
+    with export_col2:
         st.download_button(
             "Exporter le resume (TXT)",
             data=summary_text.encode("utf-8"),
@@ -732,7 +640,7 @@ Interpretation automatique :
             use_container_width=True
         )
 
-    with e3:
+    with export_col3:
         st.download_button(
             "Exporter la carte thematique (HTML)",
             data=html_map,
@@ -741,7 +649,7 @@ Interpretation automatique :
             use_container_width=True
         )
 
-    with e4:
+    with export_col4:
         st.download_button(
             "Exporter le split panel (HTML)",
             data=html_split,
@@ -749,8 +657,6 @@ Interpretation automatique :
             mime="text/html",
             use_container_width=True
         )
-
-    st.markdown("</div>", unsafe_allow_html=True)
 
 except Exception as e:
     st.error(f"Erreur pendant l'analyse : {e}")
