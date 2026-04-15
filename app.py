@@ -1,14 +1,17 @@
 import streamlit as st
 import geemap.foliumap as geemap
 import folium
-from folium.plugins import SideBySideLayers
+from folium.plugins import SideBySideLayers, Geocoder, Draw
+from streamlit_folium import st_folium
 import pandas as pd
 from datetime import date
 import plotly.graph_objects as go
 
 from processing import (
     analyze_moisture_change,
-    region_geom,
+    build_single_geotiff_download_url,
+    get_default_region_bbox,
+    get_default_region_geometry,
     MOISTURE_VIS,
     DIFF_VIS,
     GAIN_VIS,
@@ -17,60 +20,55 @@ from processing import (
 )
 
 # =========================================================
-# 1. Configuration generale de la page
+# 1. Configuration generale
 # =========================================================
 st.set_page_config(
-    page_title="Detection de changement d'humidite",
+    page_title="Plateforme de detection de changement d'humidite",
     page_icon="🛰️",
     layout="wide"
 )
 
 # =========================================================
-# 2. Fonctions utilitaires
+# 2. Etat de session
 # =========================================================
+if "drawn_polygon_geojson" not in st.session_state:
+    st.session_state.drawn_polygon_geojson = None
 
+if "export_url_p1" not in st.session_state:
+    st.session_state.export_url_p1 = None
+
+if "export_url_p2" not in st.session_state:
+    st.session_state.export_url_p2 = None
+
+if "export_url_diff" not in st.session_state:
+    st.session_state.export_url_diff = None
+
+
+# =========================================================
+# 3. Fonctions utilitaires
+# =========================================================
 MONTHS_FR = {
-    1: "janvier",
-    2: "fevrier",
-    3: "mars",
-    4: "avril",
-    5: "mai",
-    6: "juin",
-    7: "juillet",
-    8: "aout",
-    9: "septembre",
-    10: "octobre",
-    11: "novembre",
-    12: "decembre"
+    1: "janvier", 2: "fevrier", 3: "mars", 4: "avril",
+    5: "mai", 6: "juin", 7: "juillet", 8: "aout",
+    9: "septembre", 10: "octobre", 11: "novembre", 12: "decembre"
 }
 
 
 def format_date(d: date) -> str:
-    """Transforme une date Python en texte au format YYYY-MM-DD."""
     return d.strftime("%Y-%m-%d")
 
 
 def short_period_label(start_d: date, end_d: date) -> str:
-    """
-    Retourne un label court pour une periode.
-    Exemple :
-    - janvier 2022
-    - 2022-01-01 -> 2022-02-15
-    """
     if start_d.month == end_d.month and start_d.year == end_d.year:
         return f"{MONTHS_FR[start_d.month]} {start_d.year}"
     return f"{format_date(start_d)} -> {format_date(end_d)}"
 
 
 def build_dynamic_title(start_1: date, end_1: date, start_2: date, end_2: date) -> str:
-    """Construit le titre dynamique de la carte."""
     return f"Comparaison humidite : {short_period_label(start_1, end_1)} vs {short_period_label(start_2, end_2)}"
 
 
 def automatic_interpretation(stats: dict) -> str:
-    """
-    Genere un texte automatique a partir des statistiques.
-    """
     p1 = stats["period_1"]["mean"]
     p2 = stats["period_2"]["mean"]
     diff = stats["difference"]["mean"]
@@ -92,20 +90,15 @@ def automatic_interpretation(stats: dict) -> str:
     else:
         dominance = "les gains et les pertes sont proches"
 
-    texte = (
+    return (
         f"L'humidite moyenne est passée de {p1:.3f} a {p2:.3f}. "
         f"La variation moyenne a donc {tendance} ({diff:.3f}). "
         f"Environ {change_prop * 100:.2f}% de la zone presente un changement significatif. "
         f"Globalement, {dominance}."
     )
-    return texte
 
 
 def build_stats_dataframe(stats: dict, threshold: float, cloud_pct: int) -> pd.DataFrame:
-    """
-    Construit un tableau pandas contenant les statistiques
-    qui seront ensuite affichees dans Streamlit.
-    """
     rows = [
         ["Humidite periode 1", stats["period_1"]["mean"], stats["period_1"]["stdDev"], stats["period_1"]["min"], stats["period_1"]["max"]],
         ["Humidite periode 2", stats["period_2"]["mean"], stats["period_2"]["stdDev"], stats["period_2"]["min"], stats["period_2"]["max"]],
@@ -119,16 +112,10 @@ def build_stats_dataframe(stats: dict, threshold: float, cloud_pct: int) -> pd.D
         ["Seuil humidite", threshold, None, None, None],
         ["Nuages max (%)", cloud_pct, None, None, None],
     ]
-
     return pd.DataFrame(rows, columns=["Indicateur", "Valeur", "StdDev", "Min", "Max"])
 
 
-def add_compact_legend() -> str:
-    """
-    Retourne une petite legende HTML a afficher sur la carte Folium.
-    Ici, on garde un peu de HTML car Folium a besoin de HTML
-    pour afficher une legende directement sur la carte.
-    """
+def add_compact_legend():
     return """
     <div style="
         position: fixed;
@@ -166,22 +153,145 @@ def add_compact_legend() -> str:
     """
 
 
-def get_delta_text(v1: float, v2: float) -> str:
-    """Retourne le delta entre deux valeurs pour l'affichage des metrics."""
-    delta = v2 - v1
-    sign = "+" if delta >= 0 else ""
-    return f"{sign}{delta:.3f}"
-
-
-# =========================================================
-# 3. Fonctions de construction des cartes
-# =========================================================
-
-def build_thematic_map(layer_mode: str, result: dict, map_title: str):
+def add_preview_geometry_to_map(m, region_mode, bbox_values):
     """
-    Construit la carte thematique principale avec les couches
-    choisies dans l'interface.
+    Ajoute sur la carte :
+    - le vrai contour administratif de Fes-Meknes en mode par defaut
+    - la bbox personnalisee
+    - le polygone dessine
     """
+    if region_mode == "region_defaut":
+        bbox = get_default_region_bbox()
+        lat_min = bbox["lat_min"]
+        lon_min = bbox["lon_min"]
+        lat_max = bbox["lat_max"]
+        lon_max = bbox["lon_max"]
+
+        m.fit_bounds([
+            [lat_min, lon_min],
+            [lat_max, lon_max]
+        ])
+
+        # Vrai contour administratif depuis Earth Engine
+        try:
+            default_geom = get_default_region_geometry()
+            default_geojson = default_geom.getInfo()
+
+            folium.GeoJson(
+                default_geojson,
+                name="Region Fes-Meknes",
+                style_function=lambda x: {
+                    "color": "red",
+                    "weight": 2,
+                    "fillColor": "red",
+                    "fillOpacity": 0.08
+                },
+                tooltip="Region par defaut : Fes-Meknes"
+            ).add_to(m)
+        except Exception:
+            # Secours : rectangle si jamais le contour ne peut pas etre charge
+            rectangle = folium.Rectangle(
+                bounds=[
+                    [lat_min, lon_min],
+                    [lat_max, lon_max],
+                ],
+                color="red",
+                weight=2,
+                fill=True,
+                fill_opacity=0.08,
+                tooltip="Region par defaut : Fes-Meknes"
+            )
+            rectangle.add_to(m)
+
+    elif region_mode == "bbox_personnalisee":
+        lat_min = bbox_values["lat_min"]
+        lon_min = bbox_values["lon_min"]
+        lat_max = bbox_values["lat_max"]
+        lon_max = bbox_values["lon_max"]
+
+        m.fit_bounds([
+            [lat_min, lon_min],
+            [lat_max, lon_max]
+        ])
+
+        rectangle = folium.Rectangle(
+            bounds=[
+                [lat_min, lon_min],
+                [lat_max, lon_max],
+            ],
+            color="red",
+            weight=2,
+            fill=True,
+            fill_opacity=0.08,
+            tooltip="BBox personnalisee"
+        )
+        rectangle.add_to(m)
+
+    elif region_mode == "polygone_dessine":
+        if st.session_state.drawn_polygon_geojson is not None:
+            folium.GeoJson(
+                st.session_state.drawn_polygon_geojson,
+                name="Polygone dessine",
+                style_function=lambda x: {
+                    "color": "red",
+                    "weight": 2,
+                    "fillColor": "red",
+                    "fillOpacity": 0.08
+                }
+            ).add_to(m)
+
+            try:
+                geometry = st.session_state.drawn_polygon_geojson.get("geometry", {})
+                coords = []
+
+                if geometry.get("type") == "Polygon":
+                    coords = geometry["coordinates"][0]
+                elif geometry.get("type") == "MultiPolygon":
+                    coords = geometry["coordinates"][0][0]
+
+                if coords:
+                    lons = [pt[0] for pt in coords]
+                    lats = [pt[1] for pt in coords]
+
+                    m.fit_bounds([
+                        [min(lats), min(lons)],
+                        [max(lats), max(lons)]
+                    ])
+            except Exception:
+                m.location = [33.8, -5.0]
+                m.zoom_start = 7
+        else:
+            m.location = [33.8, -5.0]
+            m.zoom_start = 7
+
+
+def build_preview_map(region_mode, bbox_values):
+    m = folium.Map(location=[33.8, -5.0], zoom_start=7, control_scale=True)
+
+    add_preview_geometry_to_map(m, region_mode, bbox_values)
+
+    Geocoder(collapsed=False, position="topleft").add_to(m)
+
+    Draw(
+        export=False,
+        position="topleft",
+        draw_options={
+            "polyline": False,
+            "rectangle": False,
+            "circle": False,
+            "circlemarker": False,
+            "marker": False,
+            "polygon": True
+        },
+        edit_options={"edit": True, "remove": True}
+    ).add_to(m)
+
+    folium.LayerControl().add_to(m)
+
+    return m
+
+
+def build_thematic_map(region_geom, layer_mode: str, result: dict, map_title: str):
     m = geemap.Map()
     m.centerObject(region_geom, 8)
 
@@ -199,19 +309,14 @@ def build_thematic_map(layer_mode: str, result: dict, map_title: str):
         m.addLayer(gain_mask.selfMask(), GAIN_VIS, "Gains")
         m.addLayer(loss_mask.selfMask(), LOSS_VIS, "Pertes")
         m.addLayer(change_mask.selfMask(), BINARY_CHANGE_VIS, "Changement detecte")
-
     elif layer_mode == "Voir seulement periode 1":
         m.addLayer(moisture_1, MOISTURE_VIS, "Humidite - Periode 1")
-
     elif layer_mode == "Voir seulement periode 2":
         m.addLayer(moisture_2, MOISTURE_VIS, "Humidite - Periode 2")
-
     elif layer_mode == "Voir seulement difference":
         m.addLayer(moisture_diff, DIFF_VIS, "Difference humidite")
-
     elif layer_mode == "Voir seulement gains":
         m.addLayer(gain_mask.selfMask(), GAIN_VIS, "Gains")
-
     elif layer_mode == "Voir seulement pertes":
         m.addLayer(loss_mask.selfMask(), LOSS_VIS, "Pertes")
 
@@ -242,11 +347,7 @@ def build_thematic_map(layer_mode: str, result: dict, map_title: str):
     return m
 
 
-def build_split_map(result: dict, left_label: str, right_label: str):
-    """
-    Construit la carte split panel pour comparer la periode 1
-    et la periode 2 sur une meme carte.
-    """
+def build_split_map(region_geom, result: dict, left_label: str, right_label: str):
     m = geemap.Map()
     m.centerObject(region_geom, 8)
 
@@ -306,21 +407,14 @@ def build_split_map(result: dict, left_label: str, right_label: str):
     return m
 
 
-# =========================================================
-# 4. Fonctions de construction des graphiques
-# =========================================================
-
 def build_mean_chart(p1_mean: float, p2_mean: float, diff_mean: float):
-    """Graphique des humidites moyennes."""
     fig = go.Figure()
-
     fig.add_bar(
         x=["Periode 1", "Periode 2", "Difference"],
         y=[p1_mean, p2_mean, diff_mean],
         text=[f"{p1_mean:.3f}", f"{p2_mean:.3f}", f"{diff_mean:.3f}"],
         textposition="outside"
     )
-
     fig.update_layout(
         title="Comparaison des humidites moyennes",
         xaxis_title="Indicateurs",
@@ -328,21 +422,17 @@ def build_mean_chart(p1_mean: float, p2_mean: float, diff_mean: float):
         template="plotly_white",
         height=420
     )
-
     return fig
 
 
 def build_proportion_chart(gain_prop: float, loss_prop: float, change_prop: float):
-    """Graphique des proportions de gain, perte et changement."""
     fig = go.Figure()
-
     fig.add_bar(
         x=["Gain", "Perte", "Changement total"],
         y=[gain_prop, loss_prop, change_prop],
         text=[f"{gain_prop:.2f}%", f"{loss_prop:.2f}%", f"{change_prop:.2f}%"],
         textposition="outside"
     )
-
     fig.update_layout(
         title="Proportions de gain, perte et changement",
         xaxis_title="Categorie",
@@ -350,20 +440,59 @@ def build_proportion_chart(gain_prop: float, loss_prop: float, change_prop: floa
         template="plotly_white",
         height=420
     )
-
     return fig
 
 
-# =========================================================
-# 5. Titre principal de l'application
-# =========================================================
-st.title("🛰️ Detection automatique de changement d'humidite - Region Fes-Meknes")
-st.caption("Comparaison de deux periodes a l'aide d'un indice d'humidite (NDMI).")
+def get_delta_text(v1: float, v2: float) -> str:
+    delta = v2 - v1
+    sign = "+" if delta >= 0 else ""
+    return f"{sign}{delta:.3f}"
+
 
 # =========================================================
-# 6. Barre laterale : saisie utilisateur
+# 4. En-tete
 # =========================================================
-st.sidebar.header("Parametres d'analyse")
+st.title("🛰️ Plateforme de detection de changement d'humidite")
+st.caption("Analyse spatio-temporelle de l'humidite par imagerie Sentinel-2 et Google Earth Engine")
+
+# =========================================================
+# 5. Barre laterale
+# =========================================================
+st.sidebar.header("Configuration de l'analyse")
+
+st.sidebar.subheader("Zone d'etude")
+region_mode_label = st.sidebar.radio(
+    "Choisir la zone",
+    [
+        "Region par defaut : Fes-Meknes",
+        "BBox personnalisee (coordonnees)",
+        "Polygone dessine sur la carte"
+    ]
+)
+
+bbox_values = None
+region_mode = None
+
+if region_mode_label == "Region par defaut : Fes-Meknes":
+    region_mode = "region_defaut"
+
+elif region_mode_label == "BBox personnalisee (coordonnees)":
+    region_mode = "bbox_personnalisee"
+
+    lat_min = st.sidebar.number_input("Latitude minimale", value=33.0, format="%.6f")
+    lon_min = st.sidebar.number_input("Longitude minimale", value=-6.0, format="%.6f")
+    lat_max = st.sidebar.number_input("Latitude maximale", value=34.5, format="%.6f")
+    lon_max = st.sidebar.number_input("Longitude maximale", value=-4.0, format="%.6f")
+
+    bbox_values = {
+        "lat_min": lat_min,
+        "lon_min": lon_min,
+        "lat_max": lat_max,
+        "lon_max": lon_max,
+    }
+
+else:
+    region_mode = "polygone_dessine"
 
 st.sidebar.subheader("Periode 1")
 start_date_1 = st.sidebar.date_input("Date debut 1", value=date(2022, 1, 1), key="d1")
@@ -373,18 +502,15 @@ st.sidebar.subheader("Periode 2")
 start_date_2 = st.sidebar.date_input("Date debut 2", value=date(2024, 1, 1), key="d2")
 end_date_2 = st.sidebar.date_input("Date fin 2", value=date(2024, 1, 31), key="f2")
 
+st.sidebar.subheader("Parametres")
 cloud_pct = st.sidebar.slider("Seuil maximal de nuages (%)", 0, 100, 20)
+threshold = st.sidebar.slider("Seuil de changement d'humidite", 0.01, 0.50, 0.10, 0.01)
+stats_scale = st.sidebar.slider("Resolution des statistiques (m)", 50, 500, 100, 10)
+export_scale = st.sidebar.slider("Resolution export TIF (m)", 10, 100, 30, 10)
 
-threshold = st.sidebar.slider(
-    "Seuil de changement d'humidite",
-    min_value=0.01,
-    max_value=0.50,
-    value=0.10,
-    step=0.01
-)
-
+st.sidebar.subheader("Affichage")
 layer_mode = st.sidebar.selectbox(
-    "Affichage de la carte thematique",
+    "Carte thematique",
     [
         "Voir toutes les couches",
         "Voir seulement periode 1",
@@ -398,53 +524,118 @@ layer_mode = st.sidebar.selectbox(
 run_analysis = st.sidebar.button("Lancer l'analyse", use_container_width=True)
 
 # =========================================================
-# 7. Bloc d'explication pour l'utilisateur
+# 6. Explication
 # =========================================================
-with st.expander("Comprendre le resultat"):
+with st.expander("A propos de cette application"):
     st.write("""
-    Cette application utilise un indice d'humidite de type **NDMI**.
+    Cette application permet de comparer deux periodes temporelles a partir de l'indice NDMI.
 
-    Elle permet de suivre :
-    - l'humidite du sol
-    - l'humidite de la vegetation
-    - les petites eaux de surface
-    - les variations globales d'humidite
-
-    Le seuil de nuages sert a filtrer les images trop nuageuses.
-    Le seuil de changement d'humidite sert a garder seulement les variations importantes.
+    Elle permet aussi de choisir la zone d'etude de trois manieres :
+    - region par defaut
+    - bbox personnalisee via coordonnees
+    - polygone dessine directement sur la carte
     """)
 
 # =========================================================
-# 8. Verification des dates
+# 7. Verifications
 # =========================================================
 if start_date_1 > end_date_1 or start_date_2 > end_date_2:
     st.error("La date de debut doit etre anterieure ou egale a la date de fin.")
     st.stop()
 
+if region_mode == "bbox_personnalisee":
+    if lat_min >= lat_max or lon_min >= lon_max:
+        st.error("Les bornes de la bbox sont invalides.")
+        st.stop()
+
+# =========================================================
+# 8. Previsualisation de la zone
+# =========================================================
+st.subheader("Previsualisation de la zone d'etude")
+
+if region_mode == "region_defaut":
+    st.caption("Zone active : region par defaut Fes-Meknes")
+elif region_mode == "bbox_personnalisee":
+    st.caption(
+        f"Zone active : bbox | "
+        f"lat_min={bbox_values['lat_min']}, lon_min={bbox_values['lon_min']}, "
+        f"lat_max={bbox_values['lat_max']}, lon_max={bbox_values['lon_max']}"
+    )
+else:
+    st.caption("Zone active : polygone dessine sur la carte")
+
+preview_map = build_preview_map(region_mode, bbox_values)
+
+preview_output = st_folium(
+    preview_map,
+    width=None,
+    height=520,
+    returned_objects=["last_active_drawing", "all_drawings"]
+)
+
+if region_mode == "polygone_dessine":
+    col_save, col_clear = st.columns(2)
+
+    with col_save:
+        if st.button("Enregistrer le polygone dessine", use_container_width=True):
+            drawn = preview_output.get("last_active_drawing", None)
+
+            if drawn is not None:
+                geometry = drawn.get("geometry", {})
+                geometry_type = geometry.get("type", None)
+
+                if geometry_type in ["Polygon", "MultiPolygon"]:
+                    st.session_state.drawn_polygon_geojson = drawn
+                    st.success("Polygone enregistre avec succes.")
+                else:
+                    st.warning("Merci de dessiner un polygone valide.")
+            else:
+                st.warning("Aucun polygone detecte sur la carte.")
+
+    with col_clear:
+        if st.button("Effacer le polygone enregistre", use_container_width=True):
+            st.session_state.drawn_polygon_geojson = None
+            st.info("Le polygone enregistre a ete supprime.")
+
+    if st.session_state.drawn_polygon_geojson is None:
+        st.info("Dessine un polygone sur la carte puis clique sur 'Enregistrer le polygone dessine'.")
+
 if not run_analysis:
-    st.info("Configure les parametres dans la barre laterale, puis clique sur 'Lancer l'analyse'.")
+    st.info("Tu peux d'abord choisir la zone, puis cliquer sur 'Lancer l'analyse'.")
     st.stop()
 
 # =========================================================
-# 9. Lancement de l'analyse principale
+# 9. Verification avant analyse
+# =========================================================
+if region_mode == "polygone_dessine" and st.session_state.drawn_polygon_geojson is None:
+    st.error("Aucun polygone n'est enregistre. Dessine puis enregistre un polygone avant de lancer l'analyse.")
+    st.stop()
+
+# =========================================================
+# 10. Analyse principale
 # =========================================================
 try:
-    with st.spinner("Calcul en cours..."):
+    with st.spinner("Analyse en cours..."):
         result = analyze_moisture_change(
-            format_date(start_date_1),
-            format_date(end_date_1),
-            format_date(start_date_2),
-            format_date(end_date_2),
-            cloud_pct,
-            threshold
+            region_mode=region_mode,
+            start_date_1=format_date(start_date_1),
+            end_date_1=format_date(end_date_1),
+            start_date_2=format_date(start_date_2),
+            end_date_2=format_date(end_date_2),
+            cloud_pct=cloud_pct,
+            threshold=threshold,
+            bbox_values=bbox_values,
+            polygon_geojson=st.session_state.drawn_polygon_geojson,
+            stats_scale=stats_scale
         )
 
     stats = result["stats"]
+    region_geom = result["region_geom"]
+
     map_title = build_dynamic_title(start_date_1, end_date_1, start_date_2, end_date_2)
     interpretation_text = automatic_interpretation(stats)
     stats_df = build_stats_dataframe(stats, threshold, cloud_pct)
 
-    # Recuperation des statistiques principales
     p1_mean = stats["period_1"]["mean"]
     p2_mean = stats["period_2"]["mean"]
     diff_mean = stats["difference"]["mean"]
@@ -462,24 +653,16 @@ try:
     loss_prop = stats["loss"]["proportion"] * 100
     change_prop = stats["change"]["proportion"] * 100
 
-    gain_px = stats["gain"]["pixels"]
-    loss_px = stats["loss"]["pixels"]
-    change_px = stats["change"]["pixels"]
-
     st.success("Analyse terminee avec succes.")
 
-    # =====================================================
-    # 10. Bloc 1 : Resume statistique
-    # =====================================================
-    st.subheader("Bloc 1 - Resume statistique detaille")
-
-    info_col1, info_col2 = st.columns(2)
-    info_col1.info(f"**Periode 1**\n\n{format_date(start_date_1)} → {format_date(end_date_1)}")
-    info_col2.info(f"**Periode 2**\n\n{format_date(start_date_2)} → {format_date(end_date_2)}")
+    st.subheader("1. Resume statistique")
+    a, b = st.columns(2)
+    a.info(f"**Periode 1**\n\n{format_date(start_date_1)} → {format_date(end_date_1)}")
+    b.info(f"**Periode 2**\n\n{format_date(start_date_2)} → {format_date(end_date_2)}")
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("Humidite moyenne - Periode 1", f"{p1_mean:.3f}")
-    c2.metric("Humidite moyenne - Periode 2", f"{p2_mean:.3f}")
+    c1.metric("Humidite moyenne P1", f"{p1_mean:.3f}")
+    c2.metric("Humidite moyenne P2", f"{p2_mean:.3f}")
     c3.metric("Difference moyenne", f"{diff_mean:.3f}")
 
     c4, c5, c6 = st.columns(3)
@@ -487,106 +670,41 @@ try:
     c5.metric("Gain d'humidite", f"{gain_prop:.2f}%")
     c6.metric("Perte d'humidite", f"{loss_prop:.2f}%")
 
-    st.write("**Lecture rapide**")
-    quick1, quick2, quick3, quick4 = st.columns(4)
-    quick1.metric("Variation P2 - P1", f"{diff_mean:.3f}", delta=get_delta_text(p1_mean, p2_mean))
-    quick2.metric("Seuil humidite", f"{threshold:.2f}")
-    quick3.metric("Nuages max", f"{cloud_pct}%")
-    quick4.metric(
-        "Dominante",
-        "Gain" if gain_prop > loss_prop else "Perte" if loss_prop > gain_prop else "Equilibre"
-    )
+    st.subheader("2. Graphiques d'analyse")
+    g1, g2 = st.columns(2)
 
-    st.caption(
-        f"Details : StdDev P1={p1_std:.3f}, StdDev P2={p2_std:.3f}, StdDev Diff={diff_std:.3f} | "
-        f"Min/Max P1={p1_min:.3f}/{p1_max:.3f} | Min/Max P2={p2_min:.3f}/{p2_max:.3f}"
-    )
-
-    # =====================================================
-    # 11. Bloc 2 : Graphiques
-    # =====================================================
-    st.subheader("Bloc 2 - Graphiques d'analyse")
-
-    graph_col1, graph_col2 = st.columns(2)
-
-    with graph_col1:
+    with g1:
         fig_means = build_mean_chart(p1_mean, p2_mean, diff_mean)
         st.plotly_chart(fig_means, use_container_width=True)
 
-    with graph_col2:
+    with g2:
         fig_props = build_proportion_chart(gain_prop, loss_prop, change_prop)
         st.plotly_chart(fig_props, use_container_width=True)
 
-    # =====================================================
-    # 12. Bloc 3 : Split panel
-    # =====================================================
-    st.subheader("Bloc 3 - Split panel Periode 1 / Periode 2")
-    st.caption("Utilise le curseur vertical pour comparer directement les deux periodes.")
-
+    st.subheader("3. Split panel")
     split_map = build_split_map(
+        region_geom,
         result,
         left_label=f"Periode 1 - {short_period_label(start_date_1, end_date_1)}",
         right_label=f"Periode 2 - {short_period_label(start_date_2, end_date_2)}"
     )
-    split_map.to_streamlit(height=820)
+    split_map.to_streamlit(height=760)
 
-    # =====================================================
-    # 13. Bloc 4 : Carte thematique
-    # =====================================================
-    st.subheader("Bloc 4 - Carte thematique")
-    st.caption(f"Mode actuel : {layer_mode}")
+    st.subheader("4. Carte thematique")
+    st.caption(f"Mode d'affichage : {layer_mode}")
+    thematic_map = build_thematic_map(region_geom, layer_mode, result, map_title)
+    thematic_map.to_streamlit(height=760)
 
-    thematic_map = build_thematic_map(layer_mode, result, map_title)
-    thematic_map.to_streamlit(height=820)
-
-    # =====================================================
-    # 14. Bloc 5 : Interpretation automatique
-    # =====================================================
-    st.subheader("Bloc 5 - Interpretation automatique")
+    st.subheader("5. Interpretation automatique")
     st.info(interpretation_text)
 
-    # =====================================================
-    # 15. Bloc 6 : Tableau statistique detaille
-    # =====================================================
-    st.subheader("Bloc 6 - Tableau statistique detaille")
+    st.subheader("6. Tableau statistique detaille")
     st.dataframe(stats_df, use_container_width=True)
 
-    # =====================================================
-    # 16. Bloc 7 : Guide de lecture
-    # =====================================================
-    st.subheader("Bloc 7 - Guide de lecture")
-
-    guide_col1, guide_col2 = st.columns(2)
-
-    with guide_col1:
-        st.markdown("""
-        **Couches disponibles**
-        - Humidite - Periode 1
-        - Humidite - Periode 2
-        - Difference humidite
-        - Gains
-        - Pertes
-        - Changement detecte
-        """)
-
-    with guide_col2:
-        st.markdown("""
-        **Lecture**
-        - Palette humidite : brun -> jaune -> bleu-vert
-        - Difference : rouge -> blanc -> bleu
-        - Gains : bleu
-        - Pertes : rouge
-        - Changement detecte : violet
-        """)
-
-    # =====================================================
-    # 17. Bloc 8 : Export
-    # =====================================================
-    st.subheader("Bloc 8 - Export")
-
+    st.subheader("7. Export standard")
     csv_bytes = stats_df.to_csv(index=False).encode("utf-8")
 
-    summary_text = f"""Detection automatique de changement d'humidite - Region Fes-Meknes
+    summary_text = f"""Detection automatique de changement d'humidite
 
 Periode 1 : {format_date(start_date_1)} -> {format_date(end_date_1)}
 Periode 2 : {format_date(start_date_2)} -> {format_date(end_date_2)}
@@ -595,68 +713,95 @@ Humidite moyenne periode 1 : {p1_mean:.3f}
 Humidite moyenne periode 2 : {p2_mean:.3f}
 Difference moyenne : {diff_mean:.3f}
 
-StdDev P1 : {p1_std:.3f}
-StdDev P2 : {p2_std:.3f}
-StdDev difference : {diff_std:.3f}
-
-Min/Max P1 : {p1_min:.3f} / {p1_max:.3f}
-Min/Max P2 : {p2_min:.3f} / {p2_max:.3f}
-
 Proportion de changement : {change_prop:.2f}%
 Proportion de gain : {gain_prop:.2f}%
 Proportion de perte : {loss_prop:.2f}%
 
-Pixels changement : {change_px:.0f}
-Pixels gain : {gain_px:.0f}
-Pixels perte : {loss_px:.0f}
-
-Seuil d'humidite : {threshold:.2f}
-Seuil maximal de nuages : {cloud_pct}%
-
-Interpretation automatique :
+Interpretation :
 {interpretation_text}
 """
 
     html_map = thematic_map.get_root().render().encode("utf-8")
     html_split = split_map.get_root().render().encode("utf-8")
 
-    export_col1, export_col2, export_col3, export_col4 = st.columns(4)
+    e1, e2, e3, e4 = st.columns(4)
 
-    with export_col1:
+    with e1:
         st.download_button(
-            "Exporter les statistiques (CSV)",
+            "Exporter statistiques CSV",
             data=csv_bytes,
             file_name="statistiques_humidite.csv",
             mime="text/csv",
             use_container_width=True
         )
 
-    with export_col2:
+    with e2:
         st.download_button(
-            "Exporter le resume (TXT)",
+            "Exporter resume TXT",
             data=summary_text.encode("utf-8"),
             file_name="resume_humidite.txt",
             mime="text/plain",
             use_container_width=True
         )
 
-    with export_col3:
+    with e3:
         st.download_button(
-            "Exporter la carte thematique (HTML)",
+            "Exporter carte HTML",
             data=html_map,
             file_name="carte_humidite.html",
             mime="text/html",
             use_container_width=True
         )
 
-    with export_col4:
+    with e4:
         st.download_button(
-            "Exporter le split panel (HTML)",
+            "Exporter split HTML",
             data=html_split,
             file_name="split_panel_humidite.html",
             mime="text/html",
             use_container_width=True
         )
+
+    st.subheader("8. Export GeoTIFF a la demande")
+    st.caption("Les liens GeoTIFF sont generes seulement quand tu les demandes, pour eviter l'erreur de taille de requete.")
+
+    t1, t2, t3 = st.columns(3)
+
+    with t1:
+        if st.button("Preparer TIF Periode 1", use_container_width=True):
+            st.session_state.export_url_p1 = build_single_geotiff_download_url(
+                image=result["moisture_1"],
+                region_geom=region_geom,
+                filename="humidite_periode_1",
+                scale=export_scale
+            )
+
+        if st.session_state.export_url_p1:
+            st.link_button("Telecharger TIF Periode 1", st.session_state.export_url_p1, use_container_width=True)
+
+    with t2:
+        if st.button("Preparer TIF Periode 2", use_container_width=True):
+            st.session_state.export_url_p2 = build_single_geotiff_download_url(
+                image=result["moisture_2"],
+                region_geom=region_geom,
+                filename="humidite_periode_2",
+                scale=export_scale
+            )
+
+        if st.session_state.export_url_p2:
+            st.link_button("Telecharger TIF Periode 2", st.session_state.export_url_p2, use_container_width=True)
+
+    with t3:
+        if st.button("Preparer TIF Difference", use_container_width=True):
+            st.session_state.export_url_diff = build_single_geotiff_download_url(
+                image=result["moisture_diff"],
+                region_geom=region_geom,
+                filename="difference_humidite",
+                scale=export_scale
+            )
+
+        if st.session_state.export_url_diff:
+            st.link_button("Telecharger TIF Difference", st.session_state.export_url_diff, use_container_width=True)
 
 except Exception as e:
     st.error(f"Erreur pendant l'analyse : {e}")
