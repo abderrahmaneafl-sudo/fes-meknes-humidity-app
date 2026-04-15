@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 
 from processing import (
     analyze_moisture_change,
-    build_single_geotiff_download_url,
+    build_lightweight_geotiff_download_url,
     get_default_region_bbox,
     get_default_region_geometry,
     MOISTURE_VIS,
@@ -34,6 +34,15 @@ st.set_page_config(
 if "drawn_polygon_geojson" not in st.session_state:
     st.session_state.drawn_polygon_geojson = None
 
+if "analysis_done" not in st.session_state:
+    st.session_state.analysis_done = False
+
+if "analysis_result" not in st.session_state:
+    st.session_state.analysis_result = None
+
+if "analysis_params" not in st.session_state:
+    st.session_state.analysis_params = None
+
 if "export_url_p1" not in st.session_state:
     st.session_state.export_url_p1 = None
 
@@ -42,6 +51,15 @@ if "export_url_p2" not in st.session_state:
 
 if "export_url_diff" not in st.session_state:
     st.session_state.export_url_diff = None
+
+if "export_error_p1" not in st.session_state:
+    st.session_state.export_error_p1 = None
+
+if "export_error_p2" not in st.session_state:
+    st.session_state.export_error_p2 = None
+
+if "export_error_diff" not in st.session_state:
+    st.session_state.export_error_diff = None
 
 
 # =========================================================
@@ -154,12 +172,6 @@ def add_compact_legend():
 
 
 def add_preview_geometry_to_map(m, region_mode, bbox_values):
-    """
-    Ajoute sur la carte :
-    - le vrai contour administratif de Fes-Meknes en mode par defaut
-    - la bbox personnalisee
-    - le polygone dessine
-    """
     if region_mode == "region_defaut":
         bbox = get_default_region_bbox()
         lat_min = bbox["lat_min"]
@@ -172,7 +184,6 @@ def add_preview_geometry_to_map(m, region_mode, bbox_values):
             [lat_max, lon_max]
         ])
 
-        # Vrai contour administratif depuis Earth Engine
         try:
             default_geom = get_default_region_geometry()
             default_geojson = default_geom.getInfo()
@@ -189,7 +200,6 @@ def add_preview_geometry_to_map(m, region_mode, bbox_values):
                 tooltip="Region par defaut : Fes-Meknes"
             ).add_to(m)
         except Exception:
-            # Secours : rectangle si jamais le contour ne peut pas etre charge
             rectangle = folium.Rectangle(
                 bounds=[
                     [lat_min, lon_min],
@@ -443,12 +453,6 @@ def build_proportion_chart(gain_prop: float, loss_prop: float, change_prop: floa
     return fig
 
 
-def get_delta_text(v1: float, v2: float) -> str:
-    delta = v2 - v1
-    sign = "+" if delta >= 0 else ""
-    return f"{sign}{delta:.3f}"
-
-
 # =========================================================
 # 4. En-tete
 # =========================================================
@@ -506,7 +510,7 @@ st.sidebar.subheader("Parametres")
 cloud_pct = st.sidebar.slider("Seuil maximal de nuages (%)", 0, 100, 20)
 threshold = st.sidebar.slider("Seuil de changement d'humidite", 0.01, 0.50, 0.10, 0.01)
 stats_scale = st.sidebar.slider("Resolution des statistiques (m)", 50, 500, 100, 10)
-export_scale = st.sidebar.slider("Resolution export TIF (m)", 10, 100, 30, 10)
+export_scale = st.sidebar.slider("Resolution export TIF local (m)", 30, 200, 60, 10)
 
 st.sidebar.subheader("Affichage")
 layer_mode = st.sidebar.selectbox(
@@ -521,7 +525,14 @@ layer_mode = st.sidebar.selectbox(
     ]
 )
 
-run_analysis = st.sidebar.button("Lancer l'analyse", use_container_width=True)
+if st.sidebar.button("Lancer l'analyse", use_container_width=True):
+    st.session_state.analysis_done = True
+    st.session_state.export_url_p1 = None
+    st.session_state.export_url_p2 = None
+    st.session_state.export_url_diff = None
+    st.session_state.export_error_p1 = None
+    st.session_state.export_error_p2 = None
+    st.session_state.export_error_diff = None
 
 # =========================================================
 # 6. Explication
@@ -534,6 +545,11 @@ with st.expander("A propos de cette application"):
     - region par defaut
     - bbox personnalisee via coordonnees
     - polygone dessine directement sur la carte
+
+    L'export GeoTIFF local est volontairement allege :
+    - geometrie simplifiee
+    - export sur bbox
+    - resolution plus grossiere
     """)
 
 # =========================================================
@@ -569,142 +585,157 @@ preview_map = build_preview_map(region_mode, bbox_values)
 preview_output = st_folium(
     preview_map,
     width=None,
-    height=520,
+    height=430,
     returned_objects=["last_active_drawing", "all_drawings"]
 )
 
-if region_mode == "polygone_dessine":
-    col_save, col_clear = st.columns(2)
+# Boutons juste sous la carte
+preview_controls = st.container()
+with preview_controls:
+    if region_mode == "polygone_dessine":
+        col_save, col_clear = st.columns(2)
 
-    with col_save:
-        if st.button("Enregistrer le polygone dessine", use_container_width=True):
-            drawn = preview_output.get("last_active_drawing", None)
+        with col_save:
+            if st.button("Enregistrer le polygone dessine", use_container_width=True):
+                drawn = preview_output.get("last_active_drawing", None)
 
-            if drawn is not None:
-                geometry = drawn.get("geometry", {})
-                geometry_type = geometry.get("type", None)
+                if drawn is not None:
+                    geometry = drawn.get("geometry", {})
+                    geometry_type = geometry.get("type", None)
 
-                if geometry_type in ["Polygon", "MultiPolygon"]:
-                    st.session_state.drawn_polygon_geojson = drawn
-                    st.success("Polygone enregistre avec succes.")
+                    if geometry_type in ["Polygon", "MultiPolygon"]:
+                        st.session_state.drawn_polygon_geojson = drawn
+                        st.success("Polygone enregistre avec succes.")
+                    else:
+                        st.warning("Merci de dessiner un polygone valide.")
                 else:
-                    st.warning("Merci de dessiner un polygone valide.")
-            else:
-                st.warning("Aucun polygone detecte sur la carte.")
+                    st.warning("Aucun polygone detecte sur la carte.")
 
-    with col_clear:
-        if st.button("Effacer le polygone enregistre", use_container_width=True):
-            st.session_state.drawn_polygon_geojson = None
-            st.info("Le polygone enregistre a ete supprime.")
+        with col_clear:
+            if st.button("Effacer le polygone enregistre", use_container_width=True):
+                st.session_state.drawn_polygon_geojson = None
+                st.info("Le polygone enregistre a ete supprime.")
 
-    if st.session_state.drawn_polygon_geojson is None:
-        st.info("Dessine un polygone sur la carte puis clique sur 'Enregistrer le polygone dessine'.")
+        if st.session_state.drawn_polygon_geojson is None:
+            st.info("Dessine un polygone sur la carte puis clique sur 'Enregistrer le polygone dessine'.")
 
-if not run_analysis:
+if not st.session_state.analysis_done:
     st.info("Tu peux d'abord choisir la zone, puis cliquer sur 'Lancer l'analyse'.")
     st.stop()
 
-# =========================================================
-# 9. Verification avant analyse
-# =========================================================
 if region_mode == "polygone_dessine" and st.session_state.drawn_polygon_geojson is None:
     st.error("Aucun polygone n'est enregistre. Dessine puis enregistre un polygone avant de lancer l'analyse.")
     st.stop()
 
 # =========================================================
-# 10. Analyse principale
+# 9. Analyse principale
 # =========================================================
-try:
-    with st.spinner("Analyse en cours..."):
-        result = analyze_moisture_change(
-            region_mode=region_mode,
-            start_date_1=format_date(start_date_1),
-            end_date_1=format_date(end_date_1),
-            start_date_2=format_date(start_date_2),
-            end_date_2=format_date(end_date_2),
-            cloud_pct=cloud_pct,
-            threshold=threshold,
-            bbox_values=bbox_values,
-            polygon_geojson=st.session_state.drawn_polygon_geojson,
-            stats_scale=stats_scale
-        )
+current_params = {
+    "region_mode": region_mode,
+    "bbox_values": bbox_values,
+    "polygon_geojson": st.session_state.drawn_polygon_geojson,
+    "start_date_1": format_date(start_date_1),
+    "end_date_1": format_date(end_date_1),
+    "start_date_2": format_date(start_date_2),
+    "end_date_2": format_date(end_date_2),
+    "cloud_pct": cloud_pct,
+    "threshold": threshold,
+    "stats_scale": stats_scale
+}
 
-    stats = result["stats"]
-    region_geom = result["region_geom"]
+needs_recompute = st.session_state.analysis_params != current_params
 
-    map_title = build_dynamic_title(start_date_1, end_date_1, start_date_2, end_date_2)
-    interpretation_text = automatic_interpretation(stats)
-    stats_df = build_stats_dataframe(stats, threshold, cloud_pct)
+if needs_recompute:
+    try:
+        with st.spinner("Analyse en cours..."):
+            result = analyze_moisture_change(
+                region_mode=region_mode,
+                start_date_1=format_date(start_date_1),
+                end_date_1=format_date(end_date_1),
+                start_date_2=format_date(start_date_2),
+                end_date_2=format_date(end_date_2),
+                cloud_pct=cloud_pct,
+                threshold=threshold,
+                bbox_values=bbox_values,
+                polygon_geojson=st.session_state.drawn_polygon_geojson,
+                stats_scale=stats_scale
+            )
 
-    p1_mean = stats["period_1"]["mean"]
-    p2_mean = stats["period_2"]["mean"]
-    diff_mean = stats["difference"]["mean"]
+        st.session_state.analysis_result = result
+        st.session_state.analysis_params = current_params
 
-    p1_std = stats["period_1"]["stdDev"]
-    p2_std = stats["period_2"]["stdDev"]
-    diff_std = stats["difference"]["stdDev"]
+    except Exception as e:
+        st.error(f"Erreur pendant l'analyse : {e}")
+        st.stop()
 
-    p1_min = stats["period_1"]["min"]
-    p1_max = stats["period_1"]["max"]
-    p2_min = stats["period_2"]["min"]
-    p2_max = stats["period_2"]["max"]
+result = st.session_state.analysis_result
+stats = result["stats"]
+region_geom = result["region_geom"]
 
-    gain_prop = stats["gain"]["proportion"] * 100
-    loss_prop = stats["loss"]["proportion"] * 100
-    change_prop = stats["change"]["proportion"] * 100
+map_title = build_dynamic_title(start_date_1, end_date_1, start_date_2, end_date_2)
+interpretation_text = automatic_interpretation(stats)
+stats_df = build_stats_dataframe(stats, threshold, cloud_pct)
 
-    st.success("Analyse terminee avec succes.")
+p1_mean = stats["period_1"]["mean"]
+p2_mean = stats["period_2"]["mean"]
+diff_mean = stats["difference"]["mean"]
 
-    st.subheader("1. Resume statistique")
-    a, b = st.columns(2)
-    a.info(f"**Periode 1**\n\n{format_date(start_date_1)} → {format_date(end_date_1)}")
-    b.info(f"**Periode 2**\n\n{format_date(start_date_2)} → {format_date(end_date_2)}")
+gain_prop = stats["gain"]["proportion"] * 100
+loss_prop = stats["loss"]["proportion"] * 100
+change_prop = stats["change"]["proportion"] * 100
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Humidite moyenne P1", f"{p1_mean:.3f}")
-    c2.metric("Humidite moyenne P2", f"{p2_mean:.3f}")
-    c3.metric("Difference moyenne", f"{diff_mean:.3f}")
+st.success("Analyse terminee avec succes.")
 
-    c4, c5, c6 = st.columns(3)
-    c4.metric("Changement significatif", f"{change_prop:.2f}%")
-    c5.metric("Gain d'humidite", f"{gain_prop:.2f}%")
-    c6.metric("Perte d'humidite", f"{loss_prop:.2f}%")
+st.subheader("1. Resume statistique")
+a, b = st.columns(2)
+a.info(f"**Periode 1**\n\n{format_date(start_date_1)} → {format_date(end_date_1)}")
+b.info(f"**Periode 2**\n\n{format_date(start_date_2)} → {format_date(end_date_2)}")
 
-    st.subheader("2. Graphiques d'analyse")
-    g1, g2 = st.columns(2)
+c1, c2, c3 = st.columns(3)
+c1.metric("Humidite moyenne P1", f"{p1_mean:.3f}")
+c2.metric("Humidite moyenne P2", f"{p2_mean:.3f}")
+c3.metric("Difference moyenne", f"{diff_mean:.3f}")
 
-    with g1:
-        fig_means = build_mean_chart(p1_mean, p2_mean, diff_mean)
-        st.plotly_chart(fig_means, use_container_width=True)
+c4, c5, c6 = st.columns(3)
+c4.metric("Changement significatif", f"{change_prop:.2f}%")
+c5.metric("Gain d'humidite", f"{gain_prop:.2f}%")
+c6.metric("Perte d'humidite", f"{loss_prop:.2f}%")
 
-    with g2:
-        fig_props = build_proportion_chart(gain_prop, loss_prop, change_prop)
-        st.plotly_chart(fig_props, use_container_width=True)
+st.subheader("2. Graphiques d'analyse")
+g1, g2 = st.columns(2)
 
-    st.subheader("3. Split panel")
-    split_map = build_split_map(
-        region_geom,
-        result,
-        left_label=f"Periode 1 - {short_period_label(start_date_1, end_date_1)}",
-        right_label=f"Periode 2 - {short_period_label(start_date_2, end_date_2)}"
-    )
-    split_map.to_streamlit(height=760)
+with g1:
+    fig_means = build_mean_chart(p1_mean, p2_mean, diff_mean)
+    st.plotly_chart(fig_means, use_container_width=True)
 
-    st.subheader("4. Carte thematique")
-    st.caption(f"Mode d'affichage : {layer_mode}")
-    thematic_map = build_thematic_map(region_geom, layer_mode, result, map_title)
-    thematic_map.to_streamlit(height=760)
+with g2:
+    fig_props = build_proportion_chart(gain_prop, loss_prop, change_prop)
+    st.plotly_chart(fig_props, use_container_width=True)
 
-    st.subheader("5. Interpretation automatique")
-    st.info(interpretation_text)
+st.subheader("3. Split panel")
+split_map = build_split_map(
+    region_geom,
+    result,
+    left_label=f"Periode 1 - {short_period_label(start_date_1, end_date_1)}",
+    right_label=f"Periode 2 - {short_period_label(start_date_2, end_date_2)}"
+)
+split_map.to_streamlit(height=760)
 
-    st.subheader("6. Tableau statistique detaille")
-    st.dataframe(stats_df, use_container_width=True)
+st.subheader("4. Carte thematique")
+st.caption(f"Mode d'affichage : {layer_mode}")
+thematic_map = build_thematic_map(region_geom, layer_mode, result, map_title)
+thematic_map.to_streamlit(height=760)
 
-    st.subheader("7. Export standard")
-    csv_bytes = stats_df.to_csv(index=False).encode("utf-8")
+st.subheader("5. Interpretation automatique")
+st.info(interpretation_text)
 
-    summary_text = f"""Detection automatique de changement d'humidite
+st.subheader("6. Tableau statistique detaille")
+st.dataframe(stats_df, use_container_width=True)
+
+st.subheader("7. Export standard")
+csv_bytes = stats_df.to_csv(index=False).encode("utf-8")
+
+summary_text = f"""Detection automatique de changement d'humidite
 
 Periode 1 : {format_date(start_date_1)} -> {format_date(end_date_1)}
 Periode 2 : {format_date(start_date_2)} -> {format_date(end_date_2)}
@@ -721,87 +752,114 @@ Interpretation :
 {interpretation_text}
 """
 
-    html_map = thematic_map.get_root().render().encode("utf-8")
-    html_split = split_map.get_root().render().encode("utf-8")
+html_map = thematic_map.get_root().render().encode("utf-8")
+html_split = split_map.get_root().render().encode("utf-8")
 
-    e1, e2, e3, e4 = st.columns(4)
+e1, e2, e3, e4 = st.columns(4)
 
-    with e1:
-        st.download_button(
-            "Exporter statistiques CSV",
-            data=csv_bytes,
-            file_name="statistiques_humidite.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
+with e1:
+    st.download_button(
+        "Exporter statistiques CSV",
+        data=csv_bytes,
+        file_name="statistiques_humidite.csv",
+        mime="text/csv",
+        use_container_width=True
+    )
 
-    with e2:
-        st.download_button(
-            "Exporter resume TXT",
-            data=summary_text.encode("utf-8"),
-            file_name="resume_humidite.txt",
-            mime="text/plain",
-            use_container_width=True
-        )
+with e2:
+    st.download_button(
+        "Exporter resume TXT",
+        data=summary_text.encode("utf-8"),
+        file_name="resume_humidite.txt",
+        mime="text/plain",
+        use_container_width=True
+    )
 
-    with e3:
-        st.download_button(
-            "Exporter carte HTML",
-            data=html_map,
-            file_name="carte_humidite.html",
-            mime="text/html",
-            use_container_width=True
-        )
+with e3:
+    st.download_button(
+        "Exporter carte HTML",
+        data=html_map,
+        file_name="carte_humidite.html",
+        mime="text/html",
+        use_container_width=True
+    )
 
-    with e4:
-        st.download_button(
-            "Exporter split HTML",
-            data=html_split,
-            file_name="split_panel_humidite.html",
-            mime="text/html",
-            use_container_width=True
-        )
+with e4:
+    st.download_button(
+        "Exporter split HTML",
+        data=html_split,
+        file_name="split_panel_humidite.html",
+        mime="text/html",
+        use_container_width=True
+    )
 
-    st.subheader("8. Export GeoTIFF a la demande")
-    st.caption("Les liens GeoTIFF sont generes seulement quand tu les demandes, pour eviter l'erreur de taille de requete.")
+st.subheader("8. Export GeoTIFF local allege")
+st.caption("En cas d'echec, augmente la resolution d'export locale : 80 m, 100 m, 120 m...")
 
-    t1, t2, t3 = st.columns(3)
+t1, t2, t3 = st.columns(3)
 
-    with t1:
-        if st.button("Preparer TIF Periode 1", use_container_width=True):
-            st.session_state.export_url_p1 = build_single_geotiff_download_url(
+with t1:
+    if st.button("Preparer TIF Periode 1", use_container_width=True):
+        try:
+            st.session_state.export_url_p1 = build_lightweight_geotiff_download_url(
                 image=result["moisture_1"],
-                region_geom=region_geom,
+                region_mode=region_mode,
+                bbox_values=bbox_values,
+                polygon_geojson=st.session_state.drawn_polygon_geojson,
                 filename="humidite_periode_1",
                 scale=export_scale
             )
+            st.session_state.export_error_p1 = None
+        except Exception as e:
+            st.session_state.export_url_p1 = None
+            st.session_state.export_error_p1 = str(e)
 
-        if st.session_state.export_url_p1:
-            st.link_button("Telecharger TIF Periode 1", st.session_state.export_url_p1, use_container_width=True)
+    if st.session_state.export_url_p1:
+        st.markdown(f"[Télécharger le TIF période 1]({st.session_state.export_url_p1})")
 
-    with t2:
-        if st.button("Preparer TIF Periode 2", use_container_width=True):
-            st.session_state.export_url_p2 = build_single_geotiff_download_url(
+    if st.session_state.export_error_p1:
+        st.error(st.session_state.export_error_p1)
+
+with t2:
+    if st.button("Preparer TIF Periode 2", use_container_width=True):
+        try:
+            st.session_state.export_url_p2 = build_lightweight_geotiff_download_url(
                 image=result["moisture_2"],
-                region_geom=region_geom,
+                region_mode=region_mode,
+                bbox_values=bbox_values,
+                polygon_geojson=st.session_state.drawn_polygon_geojson,
                 filename="humidite_periode_2",
                 scale=export_scale
             )
+            st.session_state.export_error_p2 = None
+        except Exception as e:
+            st.session_state.export_url_p2 = None
+            st.session_state.export_error_p2 = str(e)
 
-        if st.session_state.export_url_p2:
-            st.link_button("Telecharger TIF Periode 2", st.session_state.export_url_p2, use_container_width=True)
+    if st.session_state.export_url_p2:
+        st.markdown(f"[Télécharger le TIF période 2]({st.session_state.export_url_p2})")
 
-    with t3:
-        if st.button("Preparer TIF Difference", use_container_width=True):
-            st.session_state.export_url_diff = build_single_geotiff_download_url(
+    if st.session_state.export_error_p2:
+        st.error(st.session_state.export_error_p2)
+
+with t3:
+    if st.button("Preparer TIF Difference", use_container_width=True):
+        try:
+            st.session_state.export_url_diff = build_lightweight_geotiff_download_url(
                 image=result["moisture_diff"],
-                region_geom=region_geom,
+                region_mode=region_mode,
+                bbox_values=bbox_values,
+                polygon_geojson=st.session_state.drawn_polygon_geojson,
                 filename="difference_humidite",
                 scale=export_scale
             )
+            st.session_state.export_error_diff = None
+        except Exception as e:
+            st.session_state.export_url_diff = None
+            st.session_state.export_error_diff = str(e)
 
-        if st.session_state.export_url_diff:
-            st.link_button("Telecharger TIF Difference", st.session_state.export_url_diff, use_container_width=True)
+    if st.session_state.export_url_diff:
+        st.markdown(f"[Télécharger le TIF différence]({st.session_state.export_url_diff})")
 
-except Exception as e:
-    st.error(f"Erreur pendant l'analyse : {e}")
+    if st.session_state.export_error_diff:
+        st.error(st.session_state.export_error_diff)

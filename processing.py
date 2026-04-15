@@ -9,7 +9,6 @@ import streamlit as st
 PROJECT_ID = "habitat-du-macaque-de-barbarie"
 DEFAULT_REGION_ASSET = "projects/habitat-du-macaque-de-barbarie/assets/fes_meknes"
 
-# BBox approximative de Fes-Meknes pour l'affichage preview
 DEFAULT_REGION_BBOX = {
     "lat_min": 33.1,
     "lon_min": -6.9,
@@ -61,7 +60,7 @@ def get_default_region_geometry():
 
 
 def get_default_region_bbox():
-    """Retourne une bbox approximative de Fes-Meknes pour la preview."""
+    """Retourne une bbox approximative de Fes-Meknes pour la preview/export."""
     return DEFAULT_REGION_BBOX
 
 
@@ -117,6 +116,48 @@ def get_region_geometry(region_mode, bbox_values=None, polygon_geojson=None):
         return get_polygon_geometry_from_geojson(polygon_geojson)
 
     raise ValueError("Mode de region inconnu.")
+
+
+def get_export_bbox_geometry(region_mode, bbox_values=None, polygon_geojson=None):
+    """
+    Retourne une geometrie simple pour l'export local.
+    On exporte sur une bbox simple, tandis que l'image reste clippee a la zone.
+    Cela reduit fortement la taille de la requete.
+    """
+    if region_mode == "region_defaut":
+        bbox = get_default_region_bbox()
+        return get_bbox_geometry(
+            bbox["lat_min"], bbox["lon_min"], bbox["lat_max"], bbox["lon_max"]
+        )
+
+    if region_mode == "bbox_personnalisee":
+        return get_bbox_geometry(
+            bbox_values["lat_min"],
+            bbox_values["lon_min"],
+            bbox_values["lat_max"],
+            bbox_values["lon_max"]
+        )
+
+    if region_mode == "polygone_dessine":
+        geom = get_polygon_geometry_from_geojson(polygon_geojson)
+        return geom.bounds(1)
+
+    raise ValueError("Mode de region inconnu pour l'export.")
+
+
+def get_simplified_clip_geometry(region_mode, bbox_values=None, polygon_geojson=None):
+    """
+    Retourne une geometrie de clipping simplifiee pour rendre l'export plus leger.
+    """
+    geom = get_region_geometry(region_mode, bbox_values, polygon_geojson)
+
+    if region_mode == "region_defaut":
+        return geom.simplify(500)
+
+    if region_mode == "polygone_dessine":
+        return geom.simplify(200)
+
+    return geom
 
 
 # =========================================================
@@ -196,22 +237,52 @@ def calculate_image_statistics(image, region_geom, band_name, scale=100):
 
 
 # =========================================================
-# 9. Export GeoTIFF a la demande
+# 9. Export GeoTIFF local allege
 # =========================================================
-def build_single_geotiff_download_url(image, region_geom, filename, scale=30):
+def build_lightweight_geotiff_download_url(
+    image,
+    region_mode,
+    bbox_values=None,
+    polygon_geojson=None,
+    filename="export_geotiff",
+    scale=60
+):
     """
-    Genere UNE URL GeoTIFF a la demande.
-    On ne l'appelle plus pendant l'analyse principale.
-    """
-    clipped_image = image.clip(region_geom)
+    Tente un export GeoTIFF direct allege vers le PC.
 
-    return clipped_image.getDownloadURL({
+    Strategie :
+    - l'image est clippee a une geometrie simplifiee
+    - la region d'export est une bbox simple
+    - resolution plus grossiere par defaut
+    """
+    clip_geom = get_simplified_clip_geometry(
+        region_mode=region_mode,
+        bbox_values=bbox_values,
+        polygon_geojson=polygon_geojson
+    )
+
+    export_region = get_export_bbox_geometry(
+        region_mode=region_mode,
+        bbox_values=bbox_values,
+        polygon_geojson=polygon_geojson
+    )
+
+    export_image = (
+        image
+        .clip(clip_geom)
+        .toFloat()
+        .unmask(-9999)
+    )
+
+    url = export_image.getDownloadURL({
         "name": filename,
-        "region": region_geom,
+        "region": export_region,
         "scale": scale,
         "crs": "EPSG:4326",
         "format": "GEO_TIFF"
     })
+
+    return url
 
 
 # =========================================================
